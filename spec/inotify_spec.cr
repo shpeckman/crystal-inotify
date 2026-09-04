@@ -2,18 +2,19 @@
 require "./spec_helper"
 
 # Waits for the first event matching the given predicate, skipping any
-# unrelated events. Raises after *timeout* without a match, or after too
-# many non-matching events.
+# unrelated events. Raises if no matching event arrives within *timeout*.
 def next_event(events : Channel(Inotify::Event), timeout : Time::Span = 5.seconds, & : Inotify::Event -> Bool) : Inotify::Event
-  20.times do
+  deadline = Time.instant + timeout
+  loop do
+    remaining = deadline - Time.instant
+    raise "timed out waiting for matching inotify event" if remaining <= Time::Span.zero
     select
     when event = events.receive
       return event if yield event
-    when timeout(timeout)
+    when timeout(remaining)
       raise "timed out waiting for matching inotify event"
     end
   end
-  raise "received 20 inotify events, none matching"
 end
 
 describe Inotify do
@@ -163,6 +164,67 @@ describe Inotify do
     watcher.closed?.should be_true
     watcher.close
     watcher.closed?.should be_true
+  end
+
+  it "reads events on an isolated execution context" do
+    mktmpdir do |dir|
+      events  = Channel(Inotify::Event).new
+      watcher = Inotify.watch(dir, isolated: true) { |event| events.send(event) }
+      File.touch(File.join(dir, "isolated.txt"))
+
+      event = next_event(events, &.type.create?)
+      event.name.should eq "isolated.txt"
+      event.path.should eq dir
+    ensure
+      watcher.try &.close
+    end
+  end
+
+  it "closes cleanly while an isolated reader is blocked on read" do
+    watcher = Inotify.watcher(isolated: true)
+    mktmpdir do |dir|
+      watcher.watch(dir)
+      sleep 100.milliseconds # let the reader block on read
+      watcher.close
+      watcher.closed?.should be_true
+    end
+  end
+
+  it "supports concurrent watch/unwatch from parallel contexts" do
+    mktmpdir do |dir|
+      events  = Channel(Inotify::Event).new(512)
+      watcher = Inotify.watch(dir) { |event| events.send(event) }
+      done    = Channel(Nil).new
+
+      2.times do |i|
+        Fiber::ExecutionContext::Isolated.new("inotify-spec-stress") do
+          30.times do |j|
+            sub = File.join(dir, "stress-#{i}-#{j}")
+            Dir.mkdir(sub)
+            watcher.watch(sub)
+            watcher.on_event { |_| } if j % 15 == 0
+            watcher.watching
+            watcher.unwatch(sub)
+          end
+          done.send(nil)
+        end
+      end
+
+      2.times do
+        select
+        when done.receive
+        when timeout(15.seconds)
+          raise "timed out waiting for stress fibers"
+        end
+      end
+
+      # The watcher is still functional afterwards.
+      File.touch(File.join(dir, "after.txt"))
+      event = next_event(events) { |e| e.type.create? && e.name == "after.txt" }
+      event.path.should eq dir
+    ensure
+      watcher.try &.close
+    end
   end
 
   describe Inotify::Event::Type do

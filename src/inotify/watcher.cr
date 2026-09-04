@@ -1,6 +1,7 @@
 # src/inotify/watcher.cr
 {% skip_file unless flag?(:linux) %}
 
+require "sync"
 require "./lib_inotify"
 require "./settings"
 require "./error"
@@ -22,10 +23,26 @@ module Inotify
   # sleep 10.seconds
   # watcher.close
   # ```
+  #
+  # ### Concurrency
+  #
+  # All mutable state is protected by a `Sync::Mutex`, so every public
+  # method is safe to call from fibers running in different — even
+  # parallel — execution contexts. The callback list is copy-on-write:
+  # event dispatch never holds the lock while running your callbacks.
+  #
+  # With `isolated: true` the event-reading fiber runs on a dedicated
+  # `Fiber::ExecutionContext::Isolated` (its own system thread). This
+  # guarantees the kernel event queue keeps being drained even when the
+  # default execution context is busy with CPU-bound fibers that never
+  # yield (protecting against `IN_Q_OVERFLOW`), at the cost of one OS
+  # thread per watcher. Event callbacks still run on the execution
+  # context that created the watcher.
   class Watcher
     @io            : IO::FileDescriptor
     @event_channel : Channel(Event)
-    @enabled         = false
+    @enabled         = Atomic(Bool).new(false)
+    @mutex           = Sync::Mutex.new
     @watch_list      = {} of Int32 => String
     @event_callbacks = [] of Proc(Event, Nil)
 
@@ -34,7 +51,10 @@ module Inotify
     # If *recursive* is `true`, all existing subdirectories of a watched
     # directory are watched as well, and subdirectories created (or moved in)
     # later are watched automatically.
-    def initialize(@recursive : Bool = false)
+    #
+    # If *isolated* is `true`, the event-reading fiber runs on a dedicated
+    # `Fiber::ExecutionContext::Isolated` thread (see "Concurrency" above).
+    def initialize(@recursive : Bool = false, *, isolated : Bool = false)
       fd = LibInotify.init(LibInotify::IN_NONBLOCK | LibInotify::IN_CLOEXEC)
       raise Error.from_errno("inotify_init1") if fd == -1
       @io = IO::FileDescriptor.new(fd)
@@ -44,23 +64,27 @@ module Inotify
       # loop instead of blocking the whole thread.
       IO::FileDescriptor.set_blocking(fd, false)
       @event_channel = Channel(Event).new
-      @enabled       = true
+      @enabled.set(true)
+      if isolated
+        Fiber::ExecutionContext::Isolated.new("inotify-watcher") { read_events }
+      else
+        spawn read_events
+      end
       spawn dispatch_events
-      spawn read_events
     end
 
     # Reads raw event data from the inotify file descriptor. Suspends the
     # current fiber on the event loop until data is available.
     private def read_events : Nil
       buffer = Bytes.new(LibInotify::BUF_LEN)
-      while @enabled
+      while @enabled.get
         bytes_read = @io.read(buffer)
         break if bytes_read <= 0
         parse_events(buffer[0, bytes_read])
       end
     rescue ex : IO::Error | Channel::ClosedError
       # A pending read or send gets interrupted when the watcher is closed.
-      raise ex if @enabled
+      raise ex if @enabled.get
     end
 
     # Splits raw event data into `Event`s and forwards them.
@@ -74,7 +98,8 @@ module Inotify
         len    = header.value.len.to_i32
 
         name  = len > 0 ? String.new((slice.to_unsafe + pos + LibInotify::EVENT_SIZE).as(LibC::Char*)) : nil
-        event = Event.new(name, @watch_list[wd]?, mask, cookie, wd)
+        path  = @mutex.synchronize { @watch_list[wd]? }
+        event = Event.new(name, path, mask, cookie, wd)
         Log.debug { "received #{event}" }
 
         # Automatically watch new subdirectories.
@@ -89,28 +114,32 @@ module Inotify
         end
 
         # The watch was removed (explicitly, by deletion, or by unmount).
-        @watch_list.delete(wd) if event.type.ignored?
+        @mutex.synchronize { @watch_list.delete(wd) } if event.type.ignored?
 
         @event_channel.send(event)
         pos += LibInotify::EVENT_SIZE + len
       end
     end
 
-    # Forwards events to all registered callbacks.
+    # Forwards events to all registered callbacks. The callback list is
+    # copy-on-write, so the lock is only taken to grab the reference and
+    # is never held while running user code.
     private def dispatch_events : Nil
       while (event = @event_channel.receive?)
-        @event_callbacks.each(&.call(event))
+        callbacks = @mutex.synchronize { @event_callbacks }
+        callbacks.each(&.call(event))
       end
     end
 
     # Registers a callback receiving all events.
     def on_event(&block : Event -> _) : Nil
-      @event_callbacks << ->(event : Event) { block.call(event); nil }
+      proc = ->(event : Event) { block.call(event); nil }
+      @mutex.synchronize { @event_callbacks += [proc] }
     end
 
     # Removes all callbacks registered with `#on_event`.
     def clear_event_handlers : Nil
-      @event_callbacks.clear
+      @mutex.synchronize { @event_callbacks = [] of Proc(Event, Nil) }
     end
 
     # Adds a new watch, or modifies an existing watch, for *path*.
@@ -122,7 +151,7 @@ module Inotify
       wd = LibInotify.add_watch(@io.fd, path, mask)
       raise Error.from_errno("inotify_add_watch") if wd == -1
       Log.debug { "watching #{path} (wd=#{wd})" }
-      @watch_list[wd] = path
+      @mutex.synchronize { @watch_list[wd] = path }
       if @recursive && File.directory?(path)
         Dir.each_child(path) do |child|
           child_path = File.join(path, child)
@@ -137,10 +166,18 @@ module Inotify
     # NOTE: *path* is case sensitive and has to exactly match the path
     # passed to `#watch`.
     def unwatch(path : String) : Bool
-      @watch_list.each do |wd, watched_path|
-        return unwatch(wd) if watched_path == path
+      wd = @mutex.synchronize do
+        match = nil
+        @watch_list.each do |watch_descriptor, watched_path|
+          if watched_path == path
+            match = watch_descriptor
+            break
+          end
+        end
+        match
       end
-      false
+      return false unless wd
+      unwatch(wd)
     end
 
     # Removes the watch with watch descriptor *wd*.
@@ -150,13 +187,13 @@ module Inotify
         raise Error.from_errno("inotify_rm_watch")
       end
       Log.debug { "unwatching wd=#{wd}" }
-      @watch_list.delete(wd)
+      @mutex.synchronize { @watch_list.delete(wd) }
       true
     end
 
     # Returns all paths that are currently being watched.
     def watching : Array(String)
-      @watch_list.values
+      @mutex.synchronize { @watch_list.values }
     end
 
     # Returns `true` if the watcher is closed.
@@ -166,8 +203,7 @@ module Inotify
 
     # Closes the inotify file descriptor and stops event delivery.
     def close : Nil
-      return if closed?
-      @enabled = false
+      return unless @enabled.swap(false)
       @io.close
       @event_channel.close
       Log.debug { "watcher closed" }

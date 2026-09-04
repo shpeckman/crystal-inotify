@@ -13,8 +13,8 @@ require "./inotify/watcher"
 # and directories for filesystem events.
 module Inotify
   # Same as `Inotify::Watcher.new`.
-  def self.watcher(recursive : Bool = false) : Inotify::Watcher
-    Watcher.new(recursive)
+  def self.watcher(recursive : Bool = false, *, isolated : Bool = false) : Inotify::Watcher
+    Watcher.new(recursive, isolated: isolated)
   end
 
   # All-in-one method to create an inotify instance watching one *path*.
@@ -34,8 +34,8 @@ module Inotify
   #
   # NOTE: You have to keep the main fiber busy (e.g. with `sleep`), or the
   # program will exit.
-  def self.watch(path : String, recursive : Bool = false, &block : Inotify::Event -> _) : Inotify::Watcher
-    inotify = Inotify.watcher(recursive)
+  def self.watch(path : String, recursive : Bool = false, *, isolated : Bool = false, &block : Inotify::Event -> _) : Inotify::Watcher
+    inotify = Inotify.watcher(recursive, isolated: isolated)
     inotify.on_event(&block)
     inotify.watch(path)
     inotify

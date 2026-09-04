@@ -14,7 +14,8 @@ Add this to your application's `shard.yml`:
 ```yaml
 dependencies:
   inotify:
-    github: shpeckman/crystal-inotify
+    github: your-user/crystal-inotify
+    version: 1.0.0
 ```
 
 Then run:
@@ -83,7 +84,17 @@ The default mask is `Inotify::DEFAULT_WATCH_FLAG` (moves, modify, create, delete
 
 ### Concurrency notes (Crystal ≥ 1.21)
 
-Crystal 1.21 enables execution contexts by default. The watcher performs all reads on its own fiber and integrates with the event loop, so it works with the default single-threaded context as well as parallel ones. Register callbacks and add watches before generating events; `Inotify::Watcher` itself is not internally synchronized for concurrent mutation from multiple parallel fibers.
+Crystal 1.21 enables execution contexts by default, and this shard embraces them:
+
+* **Thread-safe by `Sync`.** All mutable state of `Inotify::Watcher` is protected by a `Sync::Mutex`, so `watch`, `unwatch`, `watching`, `on_event`, `clear_event_handlers` and `close` are safe to call from fibers running in different — even parallel — execution contexts. The callback list is copy-on-write, so event dispatch never holds the lock while running your code (a callback can safely register more callbacks).
+* **Optional isolated reader.** Pass `isolated: true` to run the event-reading fiber on a dedicated `Fiber::ExecutionContext::Isolated` (its own OS thread). The kernel event queue keeps being drained even when your default context is busy with CPU-bound fibers that never yield — protecting against `IN_Q_OVERFLOW` — at the cost of one thread per watcher. Events cross context boundaries through a context-safe `Channel`, and your callbacks still run on the execution context that created the watcher.
+
+```crystal
+watcher = Inotify.watch("/var/log", recursive: true, isolated: true) do |event|
+  # runs on your default execution context
+  puts event.full_path
+end
+```
 
 ### Example
 
