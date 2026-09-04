@@ -1,0 +1,13 @@
+# shard.yml
+name: inotify
+version: 1.0.0
+
+description: |
+  Linux inotify bindings for Crystal — watch files and directories for changes.
+
+authors:
+  - shpeckman
+
+crystal: ">= 1.21.0"
+
+license: MIT
