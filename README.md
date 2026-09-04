@@ -13,7 +13,7 @@ Add this to your application's `shard.yml`:
 
 ```yaml
 dependencies:
-  inotify:
+  crystal-inotify:
     github: shpeckman/crystal-inotify
 ```
 
