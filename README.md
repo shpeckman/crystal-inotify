@@ -14,8 +14,7 @@ Add this to your application's `shard.yml`:
 ```yaml
 dependencies:
   inotify:
-    github: your-user/crystal-inotify
-    version: 1.0.0
+    github: shpeckman/crystal-inotify
 ```
 
 Then run:
@@ -27,7 +26,7 @@ shards install
 ## Usage
 
 ```crystal
-require "inotify"
+require "crystal-inotify"
 
 # To watch a file or directory ...
 watcher = Inotify.watch "/path/to/file.txt" do |event|
@@ -68,17 +67,17 @@ With `recursive: true`, all existing subdirectories are watched, and subdirector
 
 Every `Inotify::Event` has:
 
-| Method         | Type                | Description                                                        |
-| -------------- | ------------------- | ------------------------------------------------------------------ |
-| `#type`        | `Inotify::Event::Type` | The event type (`CREATE`, `MODIFY`, `MOVED_FROM`, ...)          |
-| `#name`        | `String?`           | Name of the file inside the watched directory (`nil` for file watches) |
-| `#path`        | `String?`           | The watched path the event occurred against                        |
-| `#full_path`   | `String?`           | `path` joined with `name`                                          |
-| `#mask`        | `UInt32`            | Raw event bitmask                                                  |
-| `#cookie`      | `UInt32`            | Connects related events (`MOVED_FROM` ↔ `MOVED_TO`)                |
-| `#wd`          | `Int32`             | Watch descriptor                                                   |
-| `#directory?`  | `Bool`              | Whether the event occurred against a directory                     |
-| `#type_is?(bits)` | `Bool`           | Test raw `LibInotify::IN_*` bits against `#mask`                   |
+| Method            | Type                   | Description                                                            |
+|-------------------|------------------------|------------------------------------------------------------------------|
+| `#type`           | `Inotify::Event::Type` | The event type (`CREATE`, `MODIFY`, `MOVED_FROM`, ...)                 |
+| `#name`           | `String?`              | Name of the file inside the watched directory (`nil` for file watches) |
+| `#path`           | `String?`              | The watched path the event occurred against                            |
+| `#full_path`      | `String?`              | `path` joined with `name`                                              |
+| `#mask`           | `UInt32`               | Raw event bitmask                                                      |
+| `#cookie`         | `UInt32`               | Connects related events (`MOVED_FROM` ↔ `MOVED_TO`)                    |
+| `#wd`             | `Int32`                | Watch descriptor                                                       |
+| `#directory?`     | `Bool`                 | Whether the event occurred against a directory                         |
+| `#type_is?(bits)` | `Bool`                 | Test raw `LibInotify::IN_*` bits against `#mask`                       |
 
 The default mask is `Inotify::DEFAULT_WATCH_FLAG` (moves, modify, create, delete). Use `LibInotify::IN_ALL_EVENTS` to receive everything.
 
